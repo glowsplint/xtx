@@ -200,11 +200,43 @@ class ExpandingWindowSplit(_BaseKFold):
                             n_samples, test_size)
         if compatible:
             for test_start in test_starts:
-                # print((residual,test_start-test_size-1), (test_start-test_size,test_start-1))
                 yield (indices[residual:test_start-test_size],
                        indices[test_start-test_size:test_start])
         else:
             for test_start in test_starts:
                 yield (indices[residual:test_start-test_size],
+                       indices[test_start-test_size:test_start],
+                       indices[test_start:test_start+test_size])
+
+class RollingWindowSplit(_BaseKFold):
+    def __init__(self, n_splits=3, compatible=True, max_train_size=None):
+        super(RollingWindowSplit, self).__init__(n_splits,
+                                              shuffle=False,
+                                              random_state=None)
+        self.max_train_size = max_train_size
+        self.compatible = compatible
+
+    def split(self, X, y=None, groups=None):
+        X, y, groups = indexable(X, y, groups)
+        n_samples = _num_samples(X)
+        n_splits = self.n_splits
+        compatible = self.compatible
+        n_folds = n_splits + 2
+        if n_folds > n_samples:
+            raise ValueError(
+                ("Cannot have number of folds = {0} greater"
+                 " than the number of samples: {1}.").format(n_folds,
+                                                             n_samples))
+        indices = np.arange(n_samples)
+        test_size = n_samples // n_folds
+        test_starts = range(n_samples-n_splits*test_size,
+                            n_samples, test_size)
+        if compatible:
+            for test_start in test_starts:
+                yield (indices[test_start-test_size*2:test_start-test_size],
+                       indices[test_start-test_size:test_start])
+        else:
+            for test_start in test_starts:
+                yield (indices[test_start-test_size*2:test_start-test_size],
                        indices[test_start-test_size:test_start],
                        indices[test_start:test_start+test_size])

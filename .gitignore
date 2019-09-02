@@ -4,3 +4,4 @@ data-training.file
 intermediate.file
 XTXStarterKit-dev.zip
 XTXStarterKit-dev
+*.joblib
