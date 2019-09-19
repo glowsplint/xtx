@@ -6,6 +6,8 @@ sys.stdout = open(os.devnull, 'w')  # do NOT remove this code, place logic & imp
 import pandas as pd
 import numpy as np
 import ta
+
+from collections import deque
 from joblib import load
 from sklearn.linear_model import LassoLarsCV
 from datetime import datetime, timedelta
@@ -16,6 +18,10 @@ from rolling import RollingWindowSplit
 scaler = load('scaler.joblib')
 pca = load('pca.joblib')
 lasso = load('lassocv.joblib')
+
+scaler_drop = load('scaler_drop.joblib')
+pca_drop = load('pca_drop.joblib')
+lasso_drop = load('lassocv_drop.joblib')
 
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
@@ -74,13 +80,16 @@ class MySubmission(Submission):
        prediction for the supplied row of data
     """
     def get_prediction(self, data):
-        # data contains the last row of massive_df
-        # need to make sure column order is the same in training and production
         X = data.values
         X_scaled = scaler.transform(X)
         X_pca = pca.transform(X_scaled)
         sigmoid = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_pca))))-0.5)*20
-        return sigmoid[0]
+
+        X_drop = data.drop([*askRateList, *askSizeList, *bidRateList, *bidSizeList], axis=1).values
+        X_scaled_drop = scaler_drop.transform(X_drop)
+        X_pca_drop = pca_drop.transform(X_scaled_drop)
+        sigmoid_drop = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_pca_drop))))-0.5)*20
+        return (sigmoid[0] + sigmoid_drop[0]) / 2
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -94,7 +103,7 @@ class MySubmission(Submission):
 
         # Create cross-sectional features
         def compute_cross_sectional(base_row):
-            # df = pd.DataFrame([base_row])
+            df = pd.DataFrame([base_row])
             df.columns = [*askRateList, *askSizeList, *bidRateList, *bidSizeList]
 
             # Cross-sectional features
@@ -122,6 +131,29 @@ class MySubmission(Submission):
             except IndexError: row.index = [datetime(1970,1,1)]
             return massive_df.append(row, sort=False)
 
+        # Time series features
+        def add_time_features(df):
+            b1, a1 = (df.bidRate0 < df.bidRate0.shift(1)), (df.askRate0 < df.askRate0.shift(1))
+            b2, a2 = (df.bidRate0 == df.bidRate0.shift(1)), (df.askRate0 == df.askRate0.shift(1))
+            valsB, valsA = [0, (df.bidSize0 - df.bidSize0.shift(1))], [0, (df.askSize0 - df.askSize0.shift(1))]
+            defaultB, defaultA = df.bidSize0, df.askSize0
+            df['deltaVBid'] = np.select([b1,b2], valsB, default=defaultB)
+            df['deltaVAsk'] = np.select([a1,a2], valsA, default=defaultA)
+            df['VOI'] = df.deltaVBid - df.deltaVAsk
+            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
+            return df
+
+        # Manual time features
+        def add_manual_time_features(df):
+            lags = [*np.arange(1,10), *np.arange(10,100,10), *np.arange(100,1000,100)]
+            def addTimeFeatures(i):
+                df['daskRate' + str(i)] = df.askRate0.diff(i)
+                df['dbidRate' + str(i)] = df.bidRate0.diff(i)
+            for i in lags:
+                addTimeFeatures(i)
+            df.fillna(0, inplace=True) # necessary
+            return df[-1005:]
+
         # Create time-based features + standardise
         def add_resample_features(massive_df, resampled_df):
             leftovers = len(massive_df) % 15
@@ -137,7 +169,7 @@ class MySubmission(Submission):
                 df_mid = massive_df.tail(15).midRate.resample('15Min').ohlc()
                 df_mid['vol'] = massive_df.tail(15).bidAskVol.resample('15Min').mean()
                 df_mid_ta = pad_history()
-                resampled_df = resampled_df.append(df_mid_ta, sort=False)
+                resampled_df = resampled_df.tail(30).append(df_mid_ta, sort=False)
             else:
                 df_mid = massive_df.tail(leftovers).midRate.resample('15Min').ohlc()
                 df_mid['vol'] = massive_df.tail(leftovers).bidAskVol.resample('15Min').mean()
@@ -145,35 +177,9 @@ class MySubmission(Submission):
 
             if 'momentum_ao' in massive_df.columns:
                 massive_df.update(df_mid_ta)
-            else: massive_df = massive_df.join(df_mid_ta)
+            else: massive_df = massive_df.join(df_mid_ta.tail(1))
             massive_df = massive_df.ffill().astype('float32')
-            df.fillna(0, inplace=True)
             return massive_df, resampled_df
-
-        # Time series features
-        def add_time_features(df):
-            b1, a1 = (df.bidRate0 < df.bidRate0.shift(1)), (df.askRate0 < df.askRate0.shift(1))
-            b2, a2 = (df.bidRate0 == df.bidRate0.shift(1)), (df.askRate0 == df.askRate0.shift(1))
-            valsB, valsA = [0, (df.bidSize0 - df.bidSize0.shift(1))], [0, (df.askSize0 - df.askSize0.shift(1))]
-            defaultB, defaultA = df.bidSize0, df.askSize0
-            df.fillna(0, inplace=True)
-            df['deltaVBid'] = np.select([b1,b2], valsB, default=defaultB)
-            df['deltaVAsk'] = np.select([a1,a2], valsA, default=defaultA)
-            df['VOI'] = df.deltaVBid - df.deltaVAsk
-            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
-            df.fillna(0, inplace=True)
-            return df
-
-        # Manual time features
-        def add_manual_time_features(df):
-            lags = [*np.arange(1,10), *np.arange(10,100,10), *np.arange(100,1000,100)]
-            def addTimeFeatures(i):
-                df['daskRate' + str(i)] = df.askRate0.diff(i)
-                df['dbidRate' + str(i)] = df.bidRate0.diff(i)
-            for i in lags:
-                addTimeFeatures(i)
-            df.fillna(0, inplace=True)
-            return df
 
         while(True):
             """
@@ -186,7 +192,7 @@ class MySubmission(Submission):
             # data = self.get_next_data_as_list()
             # base_row = self.get_next_data_as_numpy_array()
             base_row = self.get_next_data_as_string()
-            df = pd.DataFrame([[float(x) if x else 0 for x in base_row.split(',')]])
+            df = [float(x) if x else 0 for x in base_row.split(',')]
             row = compute_cross_sectional(df)
             massive_df = append_to_df(massive_df, row)
             massive_df = add_time_features(massive_df)

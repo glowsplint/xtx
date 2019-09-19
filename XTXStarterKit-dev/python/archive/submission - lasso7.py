@@ -19,10 +19,6 @@ scaler = load('scaler.joblib')
 pca = load('pca.joblib')
 lasso = load('lassocv.joblib')
 
-scaler_drop = load('scaler_drop.joblib')
-pca_drop = load('pca_drop.joblib')
-lasso_drop = load('lassocv_drop.joblib')
-
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
 bidRateList = ['bidRate' + str(i) for i in range(0,15)]
@@ -84,12 +80,7 @@ class MySubmission(Submission):
         X_scaled = scaler.transform(X)
         X_pca = pca.transform(X_scaled)
         sigmoid = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_pca))))-0.5)*20
-
-        X_drop = data.drop([*askRateList, *askSizeList, *bidRateList, *bidSizeList], axis=1).values
-        X_scaled_drop = scaler_drop.transform(X_drop)
-        X_pca_drop = pca_drop.transform(X_scaled_drop)
-        sigmoid_drop = (1/(1+np.exp(-0.22*lasso_drop.predict(np.atleast_2d(X_pca_drop))))-0.5)*20
-        return (sigmoid[0] + sigmoid_drop[0]) / 2
+        return sigmoid[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
