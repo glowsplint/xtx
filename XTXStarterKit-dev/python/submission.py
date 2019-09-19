@@ -15,13 +15,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from rolling import RollingWindowSplit
 
-scaler = load('scaler.joblib')
-pca = load('pca.joblib')
-lasso = load('lassocv.joblib')
-
-scaler_drop = load('scaler_drop.joblib')
-pca_drop = load('pca_drop.joblib')
-lasso_drop = load('lassocv_drop.joblib')
+scaler = load('scaler10.joblib')
+lasso = load('lasso_limited.joblib')
 
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
@@ -82,14 +77,8 @@ class MySubmission(Submission):
     def get_prediction(self, data):
         X = data.values
         X_scaled = scaler.transform(X)
-        X_pca = pca.transform(X_scaled)
         sigmoid = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_pca))))-0.5)*20
-
-        X_drop = data.drop([*askRateList, *askSizeList, *bidRateList, *bidSizeList], axis=1).values
-        X_scaled_drop = scaler_drop.transform(X_drop)
-        X_pca_drop = pca_drop.transform(X_scaled_drop)
-        sigmoid_drop = (1/(1+np.exp(-0.22*lasso_drop.predict(np.atleast_2d(X_pca_drop))))-0.5)*20
-        return (sigmoid[0] + sigmoid_drop[0]) / 2
+        return sigmoid[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -101,28 +90,30 @@ class MySubmission(Submission):
         self.debug_print("Use the print function `self.debug_print(...)` for debugging purposes, do NOT use the default `print(...)`")
         massive_df, resampled_df = pd.DataFrame(), pd.DataFrame()
 
-        # Create cross-sectional features
-        def compute_cross_sectional(base_row):
-            df = pd.DataFrame([base_row])
-            df.columns = [*askRateList, *askSizeList, *bidRateList, *bidSizeList]
-
-            # Cross-sectional features
-            df['spread'] = df.askRate0 - df.bidRate0
+        # only need last 15
+        def create_limited_features(df):
             df['midRate'] = (df.askRate0 + df.bidRate0) / 2
-            df['bidAskVol'] = df.askSize0 + df.bidSize0
             df['totalBidVol1'] = df.bidSize0 + df.bidSize1
             df['totalAskVol1'] = df.askSize0 + df.askSize1
-            for i in range(2,15):
+            df['bidAskVol'] = df.askSize0 + df.bidSize0
+            for i in range(2,5):
                 df['totalBidVol' + str(i)] = df['totalBidVol' + str(i-1)] + df['bidSize' + str(i)]
                 df['totalAskVol' + str(i)] = df['totalAskVol' + str(i-1)] + df['askSize' + str(i)]
-            for i in range(1,15):
-                df['bidAskRatio' + str(i)] = df['totalBidVol' + str(i)] / df['totalAskVol' + str(i)]
-            df['totalAvailVol'] = df.totalBidVol14 + df.totalAskVol14
-            df['vwaBid'] = np.einsum('ij,ji->i', df[bidRateList], df[bidSizeList].T) / df[bidSizeList].sum(axis=1)
-            df['vwaAsk'] = np.einsum('ij,ji->i', df[askRateList], df[askSizeList].T) / df[askSizeList].sum(axis=1)
-            df['vwaBidDMid'] = df.midRate - df.vwaBid
-            df['vwaAskDMid'] = df.vwaAsk - df.midRate
-            df['diff_vwaBidAskDMid'] = df.vwaAskDMid - df.vwaBidDMid
+            df['bidAskRatio4'] = df['totalBidVol' + str(4)] / df['totalAskVol' + str(4)]
+            # df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
+            # def addTimeFeatures(i):
+            #     df['daskRate' + str(i)] = df.askRate0.diff(i)
+            #     df['dbidRate' + str(i)] = df.bidRate0.diff(i)
+            # for i in range(6,11):
+            #     addTimeFeatures(i)
+            df['time'] = pd.date_range(start='1/1/1970', periods=2999999, freq='T')
+            df.set_index('time', inplace=True)
+            df_mid = df.midRate.resample('15Min').ohlc()
+            df_mid['vol'] = df.bidAskVol.resample('15Min').mean()
+            df_mid['volume_adi'] = ta.volume.acc_dist_index(df_mid.high, df_mid.low, df_mid.close, df_mid.vol, fillna=True)
+            df_mid['others_dlr'] = ta.others.daily_log_return(df_mid.close, fillna=True)
+            df = df.join(df_mid[['volume_adi', 'others_dlr']]).ffill().astype('float32')
+            df.fillna(0, inplace=True)
             return df
 
         # Append new row to massive_df
@@ -133,26 +124,18 @@ class MySubmission(Submission):
 
         # Time series features
         def add_time_features(df):
-            b1, a1 = (df.bidRate0 < df.bidRate0.shift(1)), (df.askRate0 < df.askRate0.shift(1))
-            b2, a2 = (df.bidRate0 == df.bidRate0.shift(1)), (df.askRate0 == df.askRate0.shift(1))
-            valsB, valsA = [0, (df.bidSize0 - df.bidSize0.shift(1))], [0, (df.askSize0 - df.askSize0.shift(1))]
-            defaultB, defaultA = df.bidSize0, df.askSize0
-            df['deltaVBid'] = np.select([b1,b2], valsB, default=defaultB)
-            df['deltaVAsk'] = np.select([a1,a2], valsA, default=defaultA)
-            df['VOI'] = df.deltaVBid - df.deltaVAsk
             df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
             return df
 
         # Manual time features
         def add_manual_time_features(df):
-            lags = [*np.arange(1,10), *np.arange(10,100,10), *np.arange(100,1000,100)]
             def addTimeFeatures(i):
                 df['daskRate' + str(i)] = df.askRate0.diff(i)
                 df['dbidRate' + str(i)] = df.bidRate0.diff(i)
-            for i in lags:
+            for i in range(6,11):
                 addTimeFeatures(i)
             df.fillna(0, inplace=True) # necessary
-            return df[-1005:]
+            return df[-15:]
 
         # Create time-based features + standardise
         def add_resample_features(massive_df, resampled_df):
@@ -164,6 +147,13 @@ class MySubmission(Submission):
                 a = a.append(full_resampled, sort=False)
                 a.index = pd.date_range(start=df_mid.index[-1], periods=len(a), freq='-15Min').sort_values()
                 df_mid_ta = ta.add_all_ta_features(a, "open", "high", "low", "close", "vol", fillna=True)
+
+                # need to find a way to merge below (correct) and above (wrong)
+                df_mid['volume_adi'] = ta.volume.acc_dist_index(df_mid.high, df_mid.low, df_mid.close, df_mid.vol, fillna=True)
+                df_mid['others_dlr'] = ta.others.daily_log_return(df_mid.close, fillna=True)
+                df = df.join(df_mid[['volume_adi', 'others_dlr']]).ffill().astype('float32')
+                df.fillna(0, inplace=True)
+
                 return df_mid_ta
             if leftovers == 0:
                 df_mid = massive_df.tail(15).midRate.resample('15Min').ohlc()
