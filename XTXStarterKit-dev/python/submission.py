@@ -3,6 +3,27 @@ from core import Submission
 
 sys.stdout = open(os.devnull, 'w')  # do NOT remove this code, place logic & imports below this line
 
+import pandas as pd
+import numpy as np
+import ta
+
+from joblib import load
+from datetime import datetime, timedelta
+from sklearn.linear_model import LassoLarsCV
+from sklearn.preprocessing import StandardScaler
+from rolling import RollingWindowSplit
+
+scaler = load('scaler_limited.joblib')
+lasso = load('lasso_limited.joblib')
+
+bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
+askSizeList = ['askSize' + str(i) for i in range(0,15)]
+bidRateList = ['bidRate' + str(i) for i in range(0,15)]
+askRateList = ['askRate' + str(i) for i in range(0,15)]
+relevant = ['bidAskRatio4', 'OIR', 'daskRate6', 'dbidRate6', 'daskRate7',
+            'dbidRate7', 'daskRate8', 'dbidRate8', 'daskRate9', 'dbidRate9',
+            'daskRate10', 'dbidRate10', 'volume_adi', 'others_dlr']
+
 """
 PYTHON submission
 
@@ -55,11 +76,10 @@ class MySubmission(Submission):
        prediction for the supplied row of data
     """
     def get_prediction(self, data):
-        # return 0
-        x = [float(x) if x else 0 for x in data.split(',')]
-        bidSize0 = x[45]
-        askSize0 = x[15]
-        return 0.0025 * (bidSize0 - askSize0)
+        X = data.values
+        X_scaled = scaler.transform(X)
+        sigmoid = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_scaled))))-0.5)*20
+        return sigmoid[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -69,6 +89,68 @@ class MySubmission(Submission):
     def run_submission(self):
 
         self.debug_print("Use the print function `self.debug_print(...)` for debugging purposes, do NOT use the default `print(...)`")
+        massive_df, resampled_df = pd.DataFrame(), pd.DataFrame()
+
+        # only need last 15
+        def create_limited_features(df):
+            df = pd.DataFrame([df])
+            df.columns = [*askRateList, *askSizeList, *bidRateList, *bidSizeList]
+            df['midRate'] = (df.askRate0 + df.bidRate0) / 2
+            df['totalBidVol1'] = df.bidSize0 + df.bidSize1
+            df['totalAskVol1'] = df.askSize0 + df.askSize1
+            df['bidAskVol'] = df.askSize0 + df.bidSize0
+            for i in range(2,5):
+                df['totalBidVol' + str(i)] = df['totalBidVol' + str(i-1)] + df['bidSize' + str(i)]
+                df['totalAskVol' + str(i)] = df['totalAskVol' + str(i-1)] + df['askSize' + str(i)]
+            df['bidAskRatio4'] = df['totalBidVol' + str(4)] / df['totalAskVol' + str(4)]
+            return df
+
+        # Append new row to massive_df
+        def append_to_df(massive_df, row):
+            try: row.index = [massive_df.index[-1] + timedelta(minutes=1)]
+            except IndexError: row.index = [datetime(1970,1,1)]
+            return massive_df.append(row, sort=False)
+
+        # Time series features
+        def add_time_features(df):
+            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
+            return df
+
+        # Manual time features
+        def add_manual_time_features(df):
+            def addTimeFeatures(i):
+                df['daskRate' + str(i)] = df.askRate0.diff(i)
+                df['dbidRate' + str(i)] = df.bidRate0.diff(i)
+            for i in range(6,11):
+                addTimeFeatures(i)
+            df.fillna(0, inplace=True) # necessary
+            return df[-15:]
+
+        # Create time-based features + standardise
+        def add_resample_features(massive_df, resampled_df):
+            leftovers = (massive_df.index[-1].to_pydatetime().minute+1) % 15
+            def pad_history():
+                full_resampled = resampled_df.append(row_ohlcv, sort=False)
+                a = pd.DataFrame([full_resampled.iloc[0] for j in range(1+1-len(full_resampled))])
+                a = a.append(full_resampled, sort=False) # (2,5)
+                a.index = pd.date_range(start=row_ohlcv.index[-1], periods=len(a), freq='-15Min').sort_values()
+                full_resampled['volume_adi'] = ta.volume.acc_dist_index(a.high, a.low, a.close, a.vol, fillna=True)
+                full_resampled['others_dlr'] = ta.others.daily_log_return(a.close, fillna=True)
+                return full_resampled
+            if leftovers == 0:
+                row_ohlcv = massive_df.tail(15).midRate.resample('15Min').ohlc().tail(1)
+                row_ohlcv['vol'] = massive_df.tail(15).bidAskVol.resample('15Min').mean().tail(1)
+                full_resampled = pad_history()
+                resampled_df = resampled_df.append(full_resampled, sort=False).tail(2)
+            else:
+                row_ohlcv = massive_df.tail(leftovers).midRate.resample('15Min').ohlc().tail(1)
+                row_ohlcv['vol'] = massive_df.tail(leftovers).bidAskVol.resample('15Min').mean().tail(1)
+                full_resampled = pad_history()
+            try: massive_df.drop(['volume_adi', 'others_dlr'], axis=1, inplace=True)
+            except KeyError: pass
+            massive_df = massive_df.join(full_resampled[['volume_adi', 'others_dlr']])
+            massive_df = massive_df.ffill().astype('float32')
+            return massive_df, resampled_df
 
         while(True):
             """
@@ -77,11 +159,17 @@ class MySubmission(Submission):
 
             Uncomment the one that will be used, and comment the others.
             """
-
+            # Pull data row
             # data = self.get_next_data_as_list()
-            # data = self.get_next_data_as_numpy_array()
-            data = self.get_next_data_as_string()
-
+            # base_row = self.get_next_data_as_numpy_array()
+            base_row = self.get_next_data_as_string()
+            df = [float(x) if x else 0 for x in base_row.split(',')]
+            row = create_limited_features(df)
+            massive_df = append_to_df(massive_df, row)
+            massive_df = add_time_features(massive_df)
+            massive_df = add_manual_time_features(massive_df)
+            massive_df, resampled_df = add_resample_features(massive_df, resampled_df)
+            data = pd.DataFrame([massive_df.iloc[-1][relevant]])
             prediction = self.get_prediction(data)
 
             """
