@@ -3,26 +3,6 @@ from core import Submission
 
 sys.stdout = open(os.devnull, 'w')  # do NOT remove this code, place logic & imports below this line
 
-import pandas as pd
-import numpy as np
-import ta
-
-from collections import deque
-from joblib import load
-from sklearn.linear_model import LassoLarsCV
-from datetime import datetime, timedelta
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from rolling import RollingWindowSplit
-
-scaler = load('scaler10.joblib')
-lasso = load('lasso_limited.joblib')
-
-bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
-askSizeList = ['askSize' + str(i) for i in range(0,15)]
-bidRateList = ['bidRate' + str(i) for i in range(0,15)]
-askRateList = ['askRate' + str(i) for i in range(0,15)]
-
 """
 PYTHON submission
 
@@ -75,10 +55,11 @@ class MySubmission(Submission):
        prediction for the supplied row of data
     """
     def get_prediction(self, data):
-        X = data.values
-        X_scaled = scaler.transform(X)
-        sigmoid = (1/(1+np.exp(-0.22*lasso.predict(np.atleast_2d(X_pca))))-0.5)*20
-        return sigmoid[0]
+        # return 0
+        x = [float(x) if x else 0 for x in data.split(',')]
+        bidSize0 = x[45]
+        askSize0 = x[15]
+        return 0.0025 * (bidSize0 - askSize0)
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -88,88 +69,6 @@ class MySubmission(Submission):
     def run_submission(self):
 
         self.debug_print("Use the print function `self.debug_print(...)` for debugging purposes, do NOT use the default `print(...)`")
-        massive_df, resampled_df = pd.DataFrame(), pd.DataFrame()
-
-        # only need last 15
-        def create_limited_features(df):
-            df['midRate'] = (df.askRate0 + df.bidRate0) / 2
-            df['totalBidVol1'] = df.bidSize0 + df.bidSize1
-            df['totalAskVol1'] = df.askSize0 + df.askSize1
-            df['bidAskVol'] = df.askSize0 + df.bidSize0
-            for i in range(2,5):
-                df['totalBidVol' + str(i)] = df['totalBidVol' + str(i-1)] + df['bidSize' + str(i)]
-                df['totalAskVol' + str(i)] = df['totalAskVol' + str(i-1)] + df['askSize' + str(i)]
-            df['bidAskRatio4'] = df['totalBidVol' + str(4)] / df['totalAskVol' + str(4)]
-            # df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
-            # def addTimeFeatures(i):
-            #     df['daskRate' + str(i)] = df.askRate0.diff(i)
-            #     df['dbidRate' + str(i)] = df.bidRate0.diff(i)
-            # for i in range(6,11):
-            #     addTimeFeatures(i)
-            df['time'] = pd.date_range(start='1/1/1970', periods=2999999, freq='T')
-            df.set_index('time', inplace=True)
-            df_mid = df.midRate.resample('15Min').ohlc()
-            df_mid['vol'] = df.bidAskVol.resample('15Min').mean()
-            df_mid['volume_adi'] = ta.volume.acc_dist_index(df_mid.high, df_mid.low, df_mid.close, df_mid.vol, fillna=True)
-            df_mid['others_dlr'] = ta.others.daily_log_return(df_mid.close, fillna=True)
-            df = df.join(df_mid[['volume_adi', 'others_dlr']]).ffill().astype('float32')
-            df.fillna(0, inplace=True)
-            return df
-
-        # Append new row to massive_df
-        def append_to_df(massive_df, row):
-            try: row.index = [massive_df.index[-1] + timedelta(minutes=1)]
-            except IndexError: row.index = [datetime(1970,1,1)]
-            return massive_df.append(row, sort=False)
-
-        # Time series features
-        def add_time_features(df):
-            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
-            return df
-
-        # Manual time features
-        def add_manual_time_features(df):
-            def addTimeFeatures(i):
-                df['daskRate' + str(i)] = df.askRate0.diff(i)
-                df['dbidRate' + str(i)] = df.bidRate0.diff(i)
-            for i in range(6,11):
-                addTimeFeatures(i)
-            df.fillna(0, inplace=True) # necessary
-            return df[-15:]
-
-        # Create time-based features + standardise
-        def add_resample_features(massive_df, resampled_df):
-            leftovers = len(massive_df) % 15
-            a = pd.DataFrame()
-            def pad_history():
-                full_resampled = resampled_df.append(df_mid, sort=False)
-                a = pd.DataFrame([full_resampled.iloc[0] for j in range(30+1-len(full_resampled))])
-                a = a.append(full_resampled, sort=False)
-                a.index = pd.date_range(start=df_mid.index[-1], periods=len(a), freq='-15Min').sort_values()
-                df_mid_ta = ta.add_all_ta_features(a, "open", "high", "low", "close", "vol", fillna=True)
-
-                # need to find a way to merge below (correct) and above (wrong)
-                df_mid['volume_adi'] = ta.volume.acc_dist_index(df_mid.high, df_mid.low, df_mid.close, df_mid.vol, fillna=True)
-                df_mid['others_dlr'] = ta.others.daily_log_return(df_mid.close, fillna=True)
-                df = df.join(df_mid[['volume_adi', 'others_dlr']]).ffill().astype('float32')
-                df.fillna(0, inplace=True)
-
-                return df_mid_ta
-            if leftovers == 0:
-                df_mid = massive_df.tail(15).midRate.resample('15Min').ohlc()
-                df_mid['vol'] = massive_df.tail(15).bidAskVol.resample('15Min').mean()
-                df_mid_ta = pad_history()
-                resampled_df = resampled_df.tail(30).append(df_mid_ta, sort=False)
-            else:
-                df_mid = massive_df.tail(leftovers).midRate.resample('15Min').ohlc()
-                df_mid['vol'] = massive_df.tail(leftovers).bidAskVol.resample('15Min').mean()
-                df_mid_ta = pad_history()
-
-            if 'momentum_ao' in massive_df.columns:
-                massive_df.update(df_mid_ta)
-            else: massive_df = massive_df.join(df_mid_ta.tail(1))
-            massive_df = massive_df.ffill().astype('float32')
-            return massive_df, resampled_df
 
         while(True):
             """
@@ -178,17 +77,11 @@ class MySubmission(Submission):
 
             Uncomment the one that will be used, and comment the others.
             """
-            # Pull data row
+
             # data = self.get_next_data_as_list()
-            # base_row = self.get_next_data_as_numpy_array()
-            base_row = self.get_next_data_as_string()
-            df = [float(x) if x else 0 for x in base_row.split(',')]
-            row = compute_cross_sectional(df)
-            massive_df = append_to_df(massive_df, row)
-            massive_df = add_time_features(massive_df)
-            massive_df = add_manual_time_features(massive_df)
-            massive_df, resampled_df = add_resample_features(massive_df, resampled_df)
-            data = pd.DataFrame([massive_df.iloc[-1]])
+            # data = self.get_next_data_as_numpy_array()
+            data = self.get_next_data_as_string()
+
             prediction = self.get_prediction(data)
 
             """
