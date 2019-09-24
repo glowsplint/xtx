@@ -6,26 +6,36 @@ sys.stdout = open(os.devnull, 'w')  # do NOT remove this code, place logic & imp
 import pandas as pd
 import numpy as np
 import ta
+import lightgbm as lgb
 
 from joblib import load
 from datetime import datetime, timedelta
-from sklearn.linear_model import LassoLarsCV
+# from sklearn.linear_model import LassoLarsCV
 from sklearn.preprocessing import StandardScaler
-from rolling import RollingWindowSplit
+# from rolling import RollingWindowSplit
 
 scaler = load('scaler_limited.joblib')
-lasso = load('lasso_limited.joblib')
+lgbm = load('lgbm.joblib')
 
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
 bidRateList = ['bidRate' + str(i) for i in range(0,15)]
 askRateList = ['askRate' + str(i) for i in range(0,15)]
-relevant = ['totalBidVol1', 'totalAskVol1', 'totalBidVol2', 'totalAskVol2',
-           'totalBidVol3', 'totalAskVol3', 'totalBidVol4', 'totalAskVol4',
-           'totalBidVol5', 'totalAskVol5', 'bidAskRatio4', 'bidAskRatio5', 'OIR',
-           'daskRate6', 'dbidRate6', 'daskRate7', 'dbidRate7', 'daskRate8',
-           'dbidRate8', 'daskRate9', 'dbidRate9', 'daskRate10', 'dbidRate10',
-           'daskRate20', 'midRate', 'bidAskVol', 'others_dlr']
+cols = ['askRate0', 'askRate1', 'askRate2', 'askRate3', 'askRate4',
+       'askRate5', 'askRate6', 'askRate7', 'askRate8', 'askRate9',
+       'askRate10', 'askRate11', 'askRate12', 'askRate13', 'askRate14',
+       'askSize0', 'askSize1', 'askSize2', 'askSize3', 'askSize4',
+       'askSize5', 'askSize6', 'askSize7', 'askSize8', 'askSize9',
+       'askSize10', 'askSize11', 'askSize12', 'askSize13', 'askSize14',
+       'bidRate0', 'bidRate1', 'bidRate2', 'bidRate3', 'bidRate4',
+       'bidRate5', 'bidRate6', 'bidRate7', 'bidRate8', 'bidRate9',
+       'bidRate10', 'bidRate11', 'bidRate12', 'bidRate13', 'bidRate14',
+       'bidSize0', 'bidSize1', 'bidSize2', 'bidSize3', 'bidSize4',
+       'bidSize5', 'bidSize6', 'bidSize7', 'bidSize8', 'bidSize9',
+       'bidSize10', 'bidSize11', 'bidSize12', 'bidSize13', 'bidSize14',
+       'midRate', 'OIR', 'totalAskVol', 'totalBidVol', 'OIR_total',
+       'spread', 'bidAskVol', 'vwaBid', 'vwaAsk', 'vwaBidDMid',
+       'vwaAskDMid', 'diff_vwaBidAskDMid', 'others_dlr']
 
 """
 PYTHON submission
@@ -81,7 +91,7 @@ class MySubmission(Submission):
     def get_prediction(self, data):
         X = data.values
         X_scaled = scaler.transform(X)
-        return np.clip(lasso.predict(np.atleast_2d(X_scaled)), -5, 5)[0]
+        return np.clip(lgbm.predict(np.atleast_2d(X_scaled)), -5, 5)[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -98,14 +108,18 @@ class MySubmission(Submission):
             df = pd.DataFrame([df])
             df.columns = [*askRateList, *askSizeList, *bidRateList, *bidSizeList]
             df['midRate'] = (df.bidRate0 + df.askRate0) / 2 # necessary for ohlc
-            df['bidAskVol'] = df.bidSize0 + df.askSize0 # necessary only for volume_adi
-            df['totalBidVol1'] = df.bidSize0 + df.bidSize1
-            df['totalAskVol1'] = df.askSize0 + df.askSize1
-            for i in range(2,6):
-                df['totalBidVol' + str(i)] = df['totalBidVol' + str(i-1)] + df['bidSize' + str(i)]
-                df['totalAskVol' + str(i)] = df['totalAskVol' + str(i-1)] + df['askSize' + str(i)]
-            for i in range(4,6):
-                df['bidAskRatio' + str(i)] = df['totalBidVol' + str(i)] / df['totalAskVol' + str(i)]
+            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
+            df['totalAskVol'] = df[askSizeList].sum(axis=1)
+            df['totalBidVol'] = df[bidSizeList].sum(axis=1)
+            df['OIR_total'] = (df.totalBidVol - df.totalAskVol)/(df.totalBidVol + df.totalAskVol)
+
+            df['spread'] = df.askRate0 - df.bidRate0
+            df['bidAskVol'] = df.askSize0 + df.bidSize0
+            df['vwaBid'] = np.einsum('ij,ji->i', df[bidRateList], df[bidSizeList].T) / df[bidSizeList].sum(axis=1)
+            df['vwaAsk'] = np.einsum('ij,ji->i', df[askRateList], df[askSizeList].T) / df[askSizeList].sum(axis=1)
+            df['vwaBidDMid'] = df.midRate - df.vwaBid
+            df['vwaAskDMid'] = df.vwaAsk - df.midRate
+            df['diff_vwaBidAskDMid'] = df.vwaAskDMid - df.vwaBidDMid
             return df
 
         # Append new row to massive_df
@@ -116,16 +130,7 @@ class MySubmission(Submission):
 
         # Time series features
         def add_time_features(df):
-            df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
-            lags = [*np.arange(6,10), 10]
-            def addManualTimeFeatures(i):
-                df['daskRate' + str(i)] = df.askRate0.diff(i)
-                df['dbidRate' + str(i)] = df.bidRate0.diff(i)
-            for i in lags:
-                addManualTimeFeatures(i)
-            df['daskRate20'] = df.askRate0.diff(20)
-            df.fillna(0, inplace=True)
-            return df[-25:]
+            return df[-100:]
 
         # Create time-based features + standardise
         def add_resample_features(massive_df, resampled_df):
@@ -166,7 +171,7 @@ class MySubmission(Submission):
             massive_df = append_to_df(massive_df, row)
             massive_df = add_time_features(massive_df)
             massive_df, resampled_df = add_resample_features(massive_df, resampled_df)
-            data = pd.DataFrame([massive_df.iloc[-1][relevant]])
+            data = pd.DataFrame([massive_df.iloc[-1][cols]])
             prediction = self.get_prediction(data)
 
             """
