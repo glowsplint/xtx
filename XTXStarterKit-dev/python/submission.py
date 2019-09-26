@@ -9,20 +9,15 @@ import ta
 import lightgbm as lgb
 
 from joblib import load
-from datetime import datetime, timedelta
-# from sklearn.linear_model import LassoLarsCV
-from sklearn.preprocessing import StandardScaler
-# from rolling import RollingWindowSplit
+# from datetime import datetime, timedelta
 
-scaler = load('scaler120.joblib')
-lgbm = load('lgbm120.joblib')
+lgbm = load('lgbm.joblib')
 
 num = 120
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
 bidRateList = ['bidRate' + str(i) for i in range(0,15)]
 askRateList = ['askRate' + str(i) for i in range(0,15)]
-cols = ['others_dr', 'others_dlr', 'others_cr']
 
 """
 PYTHON submission
@@ -77,8 +72,7 @@ class MySubmission(Submission):
     """
     def get_prediction(self, data):
         X = data.replace([np.inf, -np.inf], np.nan).values
-        X_scaled = scaler.transform(X)
-        return np.clip(lgbm.predict(np.atleast_2d(X_scaled)), -5, 5)[0]
+        return np.clip(lgbm.predict(np.atleast_2d(X)), -5, 5)[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -110,35 +104,6 @@ class MySubmission(Submission):
             df['diff_vwaBidAskDMid'] = df.vwaAskDMid - df.vwaBidDMid
             return df
 
-        # Append new row to massive_df
-        def append_to_df(massive_df, row):
-            try: row.index = [massive_df.index[-1] + timedelta(minutes=1)]
-            except IndexError: row.index = [datetime(1970,1,1)]
-            return massive_df.append(row, sort=False)
-
-        # Time series features
-        def add_time_features(df, num):
-            return df[-num:]
-
-        # Create time-based features + standardise
-        def add_resample_features(massive_df, resampled_df, num):
-            resampled_df_size = 15
-            leftovers = (massive_df.index[-1].value // 6e10 + 1) % num
-            def create_ohlc_features(df_mid, open_, high_, low_, close_, vol_):
-                df_mid = ta.add_others_ta(df_mid, close_)
-                return df_mid
-            row_ohlcv = massive_df.midRate.resample(str(num)+'Min').ohlc().tail(1)
-            row_ohlcv['vol'] = massive_df.bidAskVol.resample(str(num)+'Min').mean()
-            full_resampled = resampled_df.append(row_ohlcv, sort=False)
-            full_resampled = create_ohlc_features(full_resampled, 'open', 'high', 'low', 'close', 'vol')
-            if leftovers == 0:
-                resampled_df = resampled_df.append(row_ohlcv, sort=False).tail(resampled_df_size) # this adds a completed row_ohlcv
-            try: massive_df.drop(cols, axis=1, inplace=True)
-            except KeyError: pass
-            massive_df = massive_df.join(full_resampled[cols])
-            massive_df = massive_df.ffill().astype('float32') # no fillna because leaving rsi as nan is probably appropriate
-            return massive_df, resampled_df # full_resampled only for debug
-
         while(True):
             """
             NOTE: Only one of (get_next_data_as_string, get_next_data_as_list, get_next_data_as_numpy_array) can be used
@@ -152,10 +117,7 @@ class MySubmission(Submission):
             base_row = self.get_next_data_as_string()
             df = [float(x) if x else 0 for x in base_row.split(',')]
             row = create_limited_features(df)
-            massive_df = append_to_df(massive_df, row)
-            massive_df = add_time_features(massive_df, num)
-            massive_df, resampled_df = add_resample_features(massive_df, resampled_df, num)
-            data = pd.DataFrame([massive_df.iloc[-1]])
+            data = pd.DataFrame(row)
             prediction = self.get_prediction(data)
 
             """
