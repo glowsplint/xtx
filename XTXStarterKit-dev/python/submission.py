@@ -8,12 +8,11 @@ import numpy as np
 import ta
 import lightgbm as lgb
 
-from joblib import load
-# from datetime import datetime, timedelta
+# from joblib import load
 
-lgbm = load('lgbm.joblib')
+bst = lgb.Booster(model_file='booster.txt')
+massive_df_length = 875
 
-num = 120
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
 bidRateList = ['bidRate' + str(i) for i in range(0,15)]
@@ -72,7 +71,7 @@ class MySubmission(Submission):
     """
     def get_prediction(self, data):
         X = data.replace([np.inf, -np.inf], np.nan).values
-        return np.clip(lgbm.predict(np.atleast_2d(X)), -5, 5)[0]
+        return np.clip(bst.predict(np.atleast_2d(X)), -5, 5)[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -82,14 +81,14 @@ class MySubmission(Submission):
     def run_submission(self):
 
         self.debug_print("Use the print function `self.debug_print(...)` for debugging purposes, do NOT use the default `print(...)`")
-        massive_df, resampled_df = pd.DataFrame(), pd.DataFrame()
+        massive_df = pd.DataFrame()
 
         # only need last 15
         def create_limited_features(df):
             df = pd.DataFrame([df])
             df.columns = [*askRateList, *askSizeList, *bidRateList, *bidSizeList]
-            df['midRate'] = (df.bidRate0 + df.askRate0) / 2 # necessary for ohlc
-            df['bidAskVol'] = df.bidSize0 + df.askSize0 # necessary for ohlc
+            df['midRate'] = (df.bidRate0 + df.askRate0) / 2
+            df['bidAskVol'] = df.bidSize0 + df.askSize0
             df['OIR'] = (df.bidSize0 - df.askSize0)/(df.bidSize0 + df.askSize0)
             df['totalAskVol'] = df[askSizeList].sum(axis=1)
             df['totalBidVol'] = df[bidSizeList].sum(axis=1)
@@ -104,6 +103,21 @@ class MySubmission(Submission):
             df['diff_vwaBidAskDMid'] = df.vwaAskDMid - df.vwaBidDMid
             return df
 
+        def append_to_df(massive_df, row):
+            return massive_df.append(row, sort=False)
+
+        def add_time_features(df, massive_df_length):
+            nums = [*np.arange(87,870,87)]
+            for num in nums:
+                df['rsi' + str(num)] = ta.momentum.rsi(df.midRate, n=num)
+                df['tsi' + str(num)] = ta.momentum.tsi(df.midRate, s=num, r=2*num)
+                df['macd' + str(num)] = ta.trend.macd(df.midRate, n_fast=num, n_slow=int(num*2.5))
+                df['macd_diff' + str(num)] = ta.trend.macd_diff(df.midRate, n_fast=num, n_slow=int(num*2.5))
+                df['ema' + str(num)] = ta.trend.ema_indicator(df.midRate, n=num)
+                df['trix' + str(num)] = ta.trend.trix(df.midRate, n=num)
+                df['dpo' + str(num)] = ta.trend.dpo(df.midRate, n=num)
+            return df[-massive_df_length:]
+
         while(True):
             """
             NOTE: Only one of (get_next_data_as_string, get_next_data_as_list, get_next_data_as_numpy_array) can be used
@@ -111,20 +125,19 @@ class MySubmission(Submission):
 
             Uncomment the one that will be used, and comment the others.
             """
-            # Pull data row
-            # data = self.get_next_data_as_list()
-            # base_row = self.get_next_data_as_numpy_array()
+
             base_row = self.get_next_data_as_string()
             df = [float(x) if x else 0 for x in base_row.split(',')]
             row = create_limited_features(df)
-            data = pd.DataFrame(row)
+            massive_df = append_to_df(massive_df, row)
+            massive_df = add_time_features(massive_df, massive_df_length)
+            data = pd.DataFrame([massive_df.iloc[-1]])
             prediction = self.get_prediction(data)
 
             """
             submit_prediction(prediction) MUST be used to submit your prediction for the current row of data
             """
             self.submit_prediction(prediction)
-
 
 if __name__ == "__main__":
     MySubmission()
