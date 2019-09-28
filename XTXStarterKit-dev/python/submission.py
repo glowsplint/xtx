@@ -14,7 +14,7 @@ lgbm = lgb.Booster(model_file='booster.txt')
 lasso = load('lasso.joblib')
 ridge = load('ridge.joblib')
 
-massive_df_length = 1565
+massive_df_length = 5
 
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
@@ -75,7 +75,7 @@ class MySubmission(Submission):
     def get_prediction(self, data):
         X = data.replace([np.inf, -np.inf], np.nan).values
         lgbm_predictions = np.clip(lgbm.predict(np.atleast_2d(X)), -5, 5)[0]
-        X[np.isnan(X)] = 100
+        X[np.isnan(X)] = 0
         lasso_predictions = np.clip(lasso.predict(np.atleast_2d(X)), -5, 5)[0]
         return (np.vstack([lgbm_predictions, lasso_predictions]).T @ ridge.coef_)[0]
 
@@ -106,13 +106,11 @@ class MySubmission(Submission):
             df['vwaAskDMid'] = df.vwaAsk - df.midRate
             df['diff_vwaBidAskDMid'] = df.vwaAskDMid - df.vwaBidDMid
 
-            shift_val = 1
-            b1, a1 = (df.bidRate0 < df.bidRate0.shift(shift_val)), (df.askRate0 < df.askRate0.shift(shift_val))
-            b2, a2 = (df.bidRate0 == df.bidRate0.shift(shift_val)), (df.askRate0 == df.askRate0.shift(shift_val))
-            valsB, valsA = [0, (df.bidSize0 - df.bidSize0.shift(shift_val))], [0, (df.askSize0 - df.askSize0.shift(shift_val))]
-            defaultB, defaultA = df.bidSize0, df.askSize0
-            df['deltaVBid'] = np.select([b1,b2], valsB, default=defaultB)
-            df['deltaVAsk'] = np.select([a1,a2], valsA, default=defaultA)
+            b1, a1 = (df.bidRate0 < df.bidRate0.shift(1)), (df.askRate0 < df.askRate0.shift(1))
+            b2, a2 = (df.bidRate0 == df.bidRate0.shift(1)), (df.askRate0 == df.askRate0.shift(1))
+            valsB, valsA = [0, (df.bidSize0 - df.bidSize0.shift(1))], [0, (df.askSize0 - df.askSize0.shift(1))]
+            df['deltaVBid'] = np.select([b1,b2], valsB, default=df.bidSize0)
+            df['deltaVAsk'] = np.select([a1,a2], valsA, default=df.askSize0)
             df['VOI'] = df.deltaVBid - df.deltaVAsk
             return df
 
@@ -120,10 +118,6 @@ class MySubmission(Submission):
             return massive_df.append(row, sort=False)
 
         def add_time_features(df, massive_df_length):
-            tsi = [87, 261, 348, 435, 522]
-            trix = [87, 174, 348, 435, 522]
-            for t in tsi:        df['tsi' + str(t)] = ta.momentum.tsi(df.midRate, s=t, r=2.25*t)
-            for t in trix:       df['trix' + str(t)] = ta.trend.trix(df.midRate, n=t)
             return df[-massive_df_length:]
 
         while(True):
