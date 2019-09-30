@@ -10,11 +10,9 @@ import lightgbm as lgb
 
 from joblib import load
 
-lgbm = lgb.Booster(model_file='booster.txt')
-lasso = load('lasso.joblib')
-ridge = load('ridge.joblib')
+lgbm = lgb.Booster(model_file='lgbm.txt')
 
-massive_df_length = 5
+massive_df_length = 1565
 
 bidSizeList = ['bidSize' + str(i) for i in range(0,15)]
 askSizeList = ['askSize' + str(i) for i in range(0,15)]
@@ -74,10 +72,7 @@ class MySubmission(Submission):
     """
     def get_prediction(self, data):
         X = data.replace([np.inf, -np.inf], np.nan).values
-        lgbm_predictions = np.clip(lgbm.predict(np.atleast_2d(X)), -5, 5)[0]
-        X[np.isnan(X)] = 0
-        lasso_predictions = np.clip(lasso.predict(np.atleast_2d(X)), -5, 5)[0]
-        return (np.vstack([lgbm_predictions, lasso_predictions]).T @ ridge.coef_)[0]
+        return np.clip(lgbm.predict(np.atleast_2d(X)), -5, 5)[0]
 
     """
     run_submission() will iteratively fetch the next row of data in the format
@@ -118,6 +113,10 @@ class MySubmission(Submission):
             return massive_df.append(row, sort=False)
 
         def add_time_features(df, massive_df_length):
+            tsi = [87, 261, 348, 435, 522]
+            trix = [87, 174, 348, 435, 522]
+            for t in tsi:        df['tsi' + str(t)] = ta.momentum.tsi(df.midRate, s=t, r=2.25*t)
+            for t in trix:       df['trix' + str(t)] = ta.trend.trix(df.midRate, n=t)
             return df[-massive_df_length:]
 
         while(True):
