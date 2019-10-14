@@ -3,4 +3,6 @@ data-training.csv.zip
 data-training.file
 intermediate.file
 XTXStarterKit-dev.zip
+\.ipynb_checkpoints
 *.joblib
+\Readings
